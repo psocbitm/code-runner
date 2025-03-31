@@ -5,41 +5,36 @@ import { executeCode } from './executeCode.js'
 export const processTask = async task => {
   try {
     if (!task?.element) {
-      logger.error('Task is missing or does not contain an element.', { task })
-      return
+      throw new Error('Task is missing or lacks an element.')
     }
 
     let taskData
     try {
       taskData = JSON.parse(task.element)
+      logger.info('Parsed task data successfully.')
+      logger.debug('Task data:', taskData)
     } catch (error) {
-      logger.error('Failed to parse task element as JSON.', { element: task.element, error })
-      return
+      throw new Error(`Failed to parse task element as JSON: ${error.message}`)
     }
 
-    logger.info('Parsed task data successfully.', { taskData })
-
     const { id, code, language } = taskData
+    logger.info('Processing task:', { id, language })
+    logger.debug('Task code:', code)
+
     if (!id || !code || !language) {
-      logger.error('Task data is missing required fields.', { taskData })
-      return
+      throw new Error('Task data missing required fields: id, code, or language.')
     }
 
     if (!LANGUAGE_CONFIG[language]) {
-      logger.error('Unsupported language specified in task.', { language })
-      return
+      throw new Error(`Unsupported language: ${language}`)
     }
-
-    const decodedCode = Buffer.from(code, 'base64').toString()
-    if (!decodedCode) {
-      logger.error('Failed to decode base64 code.', { code })
-      return
-    }
-
-    logger.info('Executing code.', { language, id })
-    const result = await executeCode(language, decodedCode)
+    
+    logger.info('Executing code...', { id, language })
+    const result = await executeCode(language, code)
     logger.info('Code execution completed.', { id, result })
+    return { success: true, result }
   } catch (error) {
-    logger.error('Unexpected error while processing task.', { error })
+    logger.error('Error processing task:', { error: error.message, task })
+    return { success: false, error: error.message }
   }
 }
