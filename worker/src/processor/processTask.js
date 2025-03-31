@@ -1,3 +1,4 @@
+import prisma from '../config/db.js'
 import { LANGUAGE_CONFIG } from '../config/languageConfig.js'
 import logger from '../config/logger.js'
 import { executeCode } from './executeCode.js'
@@ -28,13 +29,24 @@ export const processTask = async task => {
     if (!LANGUAGE_CONFIG[language]) {
       throw new Error(`Unsupported language: ${language}`)
     }
-    
+
     logger.info('Executing code...', { id, language })
+    await prisma.code.create({
+      data: {
+        id,
+        status: 'RUNNING',
+      },
+    })
     const result = await executeCode(language, code)
     logger.info('Code execution completed.', { id, result })
-    return { success: true, result }
+    await prisma.code.update({
+      where: {
+        id: id,
+      },
+      data: { output: JSON.stringify(result.output), error: JSON.stringify(result.error), success: result.success, executionTime: result.executionTime || 0, status: 'EXECUTED' },
+    })
   } catch (error) {
-    logger.error('Error processing task:', { error: error.message, task })
-    return { success: false, error: error.message }
+    logger.error('Error processing task:', { error: error, task })
+    return { success: false, error: error }
   }
 }

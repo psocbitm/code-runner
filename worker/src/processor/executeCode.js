@@ -103,6 +103,6 @@ async function executeInDocker(language, code, tempDir, effectiveTimeout, execut
     output: stdout,
     error: stderr,
     success: true,
-    executionTime,
+    executionTime: executionTime,
   }
 }

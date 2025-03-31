@@ -1,4 +1,5 @@
 import { connectRedis } from './config/connectRedis.js'
+import './config/db.js'
 import logger from './config/logger.js'
 import { processTask } from './processor/processTask.js'
 const QUEUE_NAME = 'tasks'
