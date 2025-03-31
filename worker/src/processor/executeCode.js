@@ -1,5 +1,5 @@
 import { exec } from 'child_process'
-import { mkdtemp, rm, writeFile } from 'fs/promises'
+import { mkdtemp, writeFile } from 'fs/promises'
 import os from 'os'
 import path from 'path'
 import { promisify } from 'util'
@@ -7,15 +7,11 @@ import { buildDockerCommand } from '../utils/buildDockerCommand.js'
 import { DEFAULT_TIMEOUT_MS } from '../config/constants.js'
 import { LANGUAGE_CONFIG } from '../config/languageConfig.js'
 import logger from '../config/logger.js'
+import { validateInput } from '../utils/validateInput.js'
+import { handleExecutionError } from './errorHandler.js'
+import { cleanupTempDirectory } from './fileUtils.js'
 
 const execAsync = promisify(exec)
-
-function validateInput(language, code, timeoutMs) {
-  logger.debug('Validating inputs', { language, timeoutMs })
-  if (!LANGUAGE_CONFIG[language]) throw new Error(`Unsupported language: ${language}`)
-  if (typeof code !== 'string' || code.trim() === '') throw new Error('Code must be a non-empty string')
-  if (typeof timeoutMs !== 'number' || timeoutMs <= 0) throw new Error('Timeout must be a positive number')
-}
 
 /**
  * Executes code in a Docker container.
@@ -25,41 +21,88 @@ function validateInput(language, code, timeoutMs) {
  * @returns {Promise<{ output: string, error: string, success: boolean }>} Execution result.
  */
 export async function executeCode(language, code, timeoutMs = DEFAULT_TIMEOUT_MS) {
-  logger.info('Starting code execution', { language, timeoutMs })
-  validateInput(language, code, timeoutMs)
-  const config = LANGUAGE_CONFIG[language]
-  const effectiveTimeout = Math.max(timeoutMs, config.maxTimeoutMs || DEFAULT_TIMEOUT_MS)
-  logger.debug('Effective timeout calculated', { effectiveTimeout })
+  const executionId = Date.now().toString(36) + Math.random().toString(36).substr(2, 5)
+  logger.info('Starting code execution', { executionId, language, codeLength: code?.length, timeoutMs })
 
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'task-'))
-  logger.info('Temporary directory created', { tempDir })
   try {
-    const fileName = language === 'java' ? 'Main.java' : `script.${config.extension}`
-    const filePath = path.join(tempDir, fileName)
-    logger.debug('Writing code to file', { filePath })
-    await writeFile(filePath, code, 'utf8')
+    validateInput(language, code, timeoutMs)
 
-    const dockerCommand = buildDockerCommand(language, tempDir, fileName)
-    logger.debug('Docker command built', { dockerCommand })
-    const { stdout, stderr } = await execAsync(dockerCommand, {
-      timeout: effectiveTimeout,
-      killSignal: 'SIGKILL',
-      encoding: 'utf8',
+    const config = LANGUAGE_CONFIG[language]
+    const effectiveTimeout = Math.min(timeoutMs, config.maxTimeoutMs || DEFAULT_TIMEOUT_MS)
+    logger.debug('Execution parameters configured', {
+      executionId,
+      language,
+      requestedTimeout: timeoutMs,
+      effectiveTimeout,
+      languageConfig: config.name || language,
     })
-    logger.info('Execution completed', { stdout, stderr })
 
-    return { output: stdout, error: stderr, success: true }
-  } catch (error) {
-    if (error.killed) {
-      logger.error('Execution timed out', { effectiveTimeout })
-      throw new Error(`Execution timed out after ${effectiveTimeout}ms`)
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), `exec-${language}-`))
+    logger.info('Temporary directory created', { executionId, tempDir })
+
+    try {
+      const result = await executeInDocker(language, code, tempDir, effectiveTimeout, executionId, config)
+      return result
+    } catch (error) {
+      return handleExecutionError(error, effectiveTimeout, executionId, language)
+    } finally {
+      await cleanupTempDirectory(tempDir, executionId)
     }
-    logger.error('Execution failed', { error: error.message })
-    throw new Error(`Execution failed: ${error.message}`)
-  } finally {
-    logger.info('Cleaning up temporary directory', { tempDir })
-    await rm(tempDir, { recursive: true, force: true }).catch(() => {
-      logger.warn('Failed to clean up temporary directory', { tempDir })
+  } catch (validationError) {
+    logger.error('Code execution failed during initialization', {
+      executionId,
+      language,
+      errorMessage: validationError.message,
     })
+
+    return {
+      output: '',
+      error: validationError.message,
+      success: false,
+      executionTime: 0,
+    }
+  }
+}
+
+/**
+ * Executes the code in a Docker container
+ * @private
+ */
+async function executeInDocker(language, code, tempDir, effectiveTimeout, executionId, config) {
+  const fileName = language === 'java' ? 'Main.java' : `script.${config.extension}`
+  const filePath = path.join(tempDir, fileName)
+  logger.debug('Writing code to temporary file', { executionId, filePath, fileName })
+  await writeFile(filePath, code, 'utf8')
+  logger.debug('Code successfully written to file', { executionId, filePath })
+
+  const dockerCommand = buildDockerCommand(language, tempDir, fileName)
+  logger.debug('Docker execution command prepared', {
+    executionId,
+    command: dockerCommand.substring(0, 100) + (dockerCommand.length > 100 ? '...' : ''),
+  })
+
+  const startTime = Date.now()
+  logger.info('Executing code in Docker container', { executionId, language, startTime: new Date(startTime).toISOString() })
+
+  const { stdout, stderr } = await execAsync(dockerCommand, {
+    timeout: effectiveTimeout,
+    killSignal: 'SIGKILL',
+    encoding: 'utf8',
+  })
+
+  const executionTime = Date.now() - startTime
+  logger.info('Code execution completed successfully', {
+    executionId,
+    language,
+    executionTime,
+    outputLength: stdout?.length,
+    errorLength: stderr?.length,
+  })
+
+  return {
+    output: stdout,
+    error: stderr,
+    success: true,
+    executionTime,
   }
 }
